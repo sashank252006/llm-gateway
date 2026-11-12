@@ -60,7 +60,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       };
 
       return { response, usage };
-    } catch (err: unknown) { throw classifyOpenAIError(err); }
+    } catch (err: unknown) { throw classifyOpenAIError(err, timeoutSignal, ctx.signal); }
   }
 
   async *stream(req: ChatRequest, target: Target, ctx: CallContext): AsyncIterable<ChatChunk> {
@@ -81,7 +81,7 @@ export class OpenAIAdapter implements ProviderAdapter {
         stream: true,
         stream_options: { include_usage: true },
       }, { signal }) as unknown as AsyncIterable<OpenAI.ChatCompletionChunk>;
-    } catch (err: unknown) { throw classifyOpenAIError(err); }
+    } catch (err: unknown) { throw classifyOpenAIError(err, timeoutSignal, ctx.signal); }
 
     const id = `chatcmpl-${ctx.requestId}`;
     const created = Math.floor(Date.now() / 1000);
@@ -109,7 +109,7 @@ export class OpenAIAdapter implements ProviderAdapter {
           } : null,
         };
       }
-    } catch (err: unknown) { throw classifyOpenAIError(err); }
+    } catch (err: unknown) { throw classifyOpenAIError(err, timeoutSignal, ctx.signal); }
   }
 }
 
@@ -120,7 +120,10 @@ function retryAfterMs(err: { headers?: Headers | Record<string, string | undefin
   return Number.isFinite(seconds) ? Math.max(0, seconds * 1000) : undefined;
 }
 
-function classifyOpenAIError(err: unknown) {
+function classifyOpenAIError(err: unknown, timeoutSignal?: AbortSignal, clientSignal?: AbortSignal) {
+  // The SDK represents our AbortSignal.timeout() as APIUserAbortError, which
+  // would otherwise be indistinguishable from an ordinary network failure.
+  if (timeoutSignal?.aborted && !clientSignal?.aborted) return classifyTimeout();
   if (err instanceof OpenAI.APIConnectionTimeoutError) return classifyTimeout();
   if (err instanceof OpenAI.APIUserAbortError) return classifyNetworkError();
   if (err instanceof OpenAI.APIConnectionError) return classifyNetworkError();

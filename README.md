@@ -212,7 +212,7 @@ The gateway depends on Postgres and Redis with `condition: service_healthy`.
 
 **Nginx essentials for SSE:** `proxy_buffering off` on `/v1/` — without this, streaming chunks arrive in bursts.
 
-For Internet-facing deployment, replace the domain and email in `deploy/.env`, obtain a certificate with `docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tls.yml --profile tls run --rm certbot`, then start the same two Compose files without the `certbot` profile. The TLS overlay enables HTTPS, HSTS, ACME validation, request forwarding headers, and the admin network allowlist.
+For Internet-facing deployment, start the base Compose stack first so Nginx can serve the ACME challenge, then replace the domain, email, and admin CIDR in `deploy/.env` and obtain a certificate with `docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tls.yml --profile tls run --rm certbot`. Finally restart using both Compose files without the `certbot` profile. The TLS overlay enables HTTPS, HSTS, ACME validation, request forwarding headers, and the admin network allowlist.
 
 ## Benchmarks
 

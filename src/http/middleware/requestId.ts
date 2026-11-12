@@ -34,7 +34,10 @@ export function requestIdMiddleware(req: Request, res: Response, next: NextFunct
     requestsTotal.inc({ alias, http_status: String(res.statusCode), cache });
     requestDuration.observe({ alias, stream: String(body?.stream === true) }, latencyMs / 1000);
     overheadSeconds.observe(Math.max(0, latencyMs - Number(res.locals.upstreamLatencyMs ?? 0)) / 1000);
-    req.log.info({ msg: 'request completed', method: req.method, path: req.path, status: res.statusCode, latency_ms: latencyMs, alias, cache });
+    req.log.info({
+      msg: 'request completed', method: req.method, path: req.path, status: res.statusCode, latency_ms: latencyMs, alias, cache,
+      ...(res.locals.requestLog ?? {}),
+    });
   });
   next();
 }

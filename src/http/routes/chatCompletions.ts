@@ -135,11 +135,24 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
               latencyMs,
               attemptRecords: [],
             });
+            res.locals.requestLog = {
+              api_key_id: apiKey.id, provider: cached.provider, model: cached.model,
+              fallback: false, attempts: 0,
+              input_tokens: 0, output_tokens: 0, cost_usd: 0,
+              saved_cost_usd: computeCost(cached.provider, cached.model, cached.response.usage.prompt_tokens, cached.response.usage.completion_tokens),
+              error_code: null,
+            };
             return;
           }
           cacheResult = 'MISS';
           cacheRequestsTotal.inc({ result: 'miss' });
         } catch {
+          // A failed cached-stream write is already a committed response. Never
+          // fall through and call a provider after sending part of that reply.
+          if (res.headersSent) {
+            if (!res.writableEnded) res.end();
+            return;
+          }
           cacheResult = 'SKIP';
           cacheRequestsTotal.inc({ result: 'skip' });
         }
@@ -225,6 +238,12 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
               status: 'error', httpStatus: err instanceof GatewayError ? err.httpStatus : 500,
               errorCode: err instanceof GatewayError ? err.code : 'internal_error', latencyMs, attemptRecords: attempts,
             });
+            res.locals.requestLog = {
+              api_key_id: apiKey.id, provider: null, model: null,
+              fallback: attempts.some((attempt) => attempt.provider !== route.chain[0]?.provider), attempts: attempts.length,
+              input_tokens: null, output_tokens: null, cost_usd: null,
+              error_code: err instanceof GatewayError ? err.code : 'internal_error',
+            };
             return next(err);
           }
         }
@@ -273,6 +292,13 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
           ttfbMs,
           attemptRecords: finalAttempts as Parameters<typeof enqueueUsage>[0]['attemptRecords'],
         });
+        res.locals.requestLog = {
+          api_key_id: apiKey.id, provider: finalProvider || null, model: finalModel || null,
+          fallback: finalAttempts.length > 1, attempts: finalAttempts.length,
+          input_tokens: lastUsage?.prompt_tokens ?? null, output_tokens: lastUsage?.completion_tokens ?? null,
+          cost_usd: lastUsage && finalProvider && finalModel ? computeCost(finalProvider, finalModel, lastUsage.prompt_tokens, lastUsage.completion_tokens) : null,
+          error_code: streamInterrupted ? 'upstream_error' : null,
+        };
         return;
       }
 
@@ -316,6 +342,13 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
           upstreamLatencyMs: upstreamMs,
           attemptRecords: result.attempts,
         });
+        res.locals.requestLog = {
+          api_key_id: apiKey.id, provider: result.provider, model: result.model,
+          fallback: result.fallbackUsed, attempts: result.attempts.length,
+          input_tokens: result.usage.prompt_tokens, output_tokens: result.usage.completion_tokens,
+          cost_usd: computeCost(result.provider, result.model, result.usage.prompt_tokens, result.usage.completion_tokens),
+          error_code: null,
+        };
       } catch (err) {
         const latencyMs = Date.now() - startTime;
         const failedAttempts = (err instanceof GatewayError && Array.isArray(err.attempts) ? err.attempts : []) as AttemptRecord[];
@@ -328,14 +361,20 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
           alias,
           stream: false,
           cacheHit: false,
-          fallbackUsed: false,
-          attempts: 0,
-          status: 'error',
+          fallbackUsed: failedAttempts.some((attempt) => attempt.provider !== route.chain[0]?.provider),
+          attempts: failedAttempts.length,
+          status: err instanceof GatewayError && err.code === 'client_aborted' ? 'client_aborted' : 'error',
           httpStatus,
           errorCode: err instanceof GatewayError ? err.code : 'internal_error',
           latencyMs,
           attemptRecords: failedAttempts,
         });
+        res.locals.requestLog = {
+          api_key_id: apiKey.id, provider: null, model: null,
+          fallback: failedAttempts.some((attempt) => attempt.provider !== route.chain[0]?.provider), attempts: failedAttempts.length,
+          input_tokens: null, output_tokens: null, cost_usd: null,
+          error_code: err instanceof GatewayError ? err.code : 'internal_error',
+        };
         next(err);
       }
     }

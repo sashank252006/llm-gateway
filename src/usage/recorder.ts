@@ -38,6 +38,13 @@ const eventQueue: QueuedUsageRecord[] = [];
 const unknownPriceModels = new Set<string>();
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let prismaRef: PrismaClient | null = null;
+let lastFlushErrorAt = 0;
+
+function isPermanentUsageError(err: unknown): boolean {
+  const code = (err as { code?: string }).code;
+  // Foreign-key and malformed-value failures cannot be repaired by retrying.
+  return code === 'P2003' || code === 'P2009' || code === 'P2010';
+}
 
 export function initUsageRecorder(prisma: PrismaClient): void {
   prismaRef = prisma;
@@ -141,19 +148,24 @@ async function flush(): Promise<void> {
       }
     }
   } catch (err) {
-    logger.error({ msg: 'Usage flush error', error: (err as Error).message });
-    const retryable = queuedBatch
-      .map((queued) => ({ ...queued, failures: queued.failures + 1 }))
-      .filter((queued) => queued.failures <= 3);
-    const dropped = queuedBatch.length - retryable.length;
-    if (dropped > 0) {
-      usageRowsDropped.inc(dropped);
-      logger.error({ msg: 'Dropping usage rows after repeated write failures', count: dropped });
+    if (Date.now() - lastFlushErrorAt > 30_000) {
+      lastFlushErrorAt = Date.now();
+      logger.error({ msg: 'Usage flush error', error: (err as Error).message });
+    }
+    const retryable = isPermanentUsageError(err) ? [] : queuedBatch.map((queued) => ({ ...queued, failures: queued.failures + 1 }));
+    if (isPermanentUsageError(err)) {
+      usageRowsDropped.inc(queuedBatch.length);
+      logger.error({ msg: 'Dropping permanently invalid usage rows', count: queuedBatch.length, code: (err as { code?: string }).code });
     }
     const toRestore = retryable.slice(0, Math.max(0, env.USAGE_QUEUE_MAX - eventQueue.length));
     eventQueue.unshift(...toRestore);
     usageQueueDepth.set(eventQueue.length);
   }
+}
+
+/** Explicit flush hook for tests and controlled shutdown paths. */
+export async function flushPendingUsage(): Promise<void> {
+  await flush();
 }
 
 export async function flushAndShutdown(): Promise<void> {

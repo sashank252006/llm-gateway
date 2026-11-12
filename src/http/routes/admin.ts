@@ -16,7 +16,20 @@ const limitsSchema = z.object({
   cache_enabled: z.boolean().optional(),
 }).strict();
 const createKeySchema = limitsSchema.extend({ name: z.string().trim().min(1).max(120) });
-const dateString = z.string().datetime({ offset: true });
+const dateString = z.string().refine(
+  (value) => /^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isNaN(Date.parse(value)),
+  'must be an ISO date or datetime',
+);
+
+function jsonSafe(value: unknown): unknown {
+  if (typeof value === 'bigint') return value.toString();
+  if (Array.isArray(value)) return value.map(jsonSafe);
+  if (value && typeof value === 'object' && !(value instanceof Date)) {
+    if ((value as { constructor?: { name?: string } }).constructor?.name === 'Decimal') return String(value);
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, nested]) => [key, jsonSafe(nested)]));
+  }
+  return value;
+}
 
 function parsed<T>(schema: z.ZodType<T>, value: unknown, next: NextFunction): T | undefined {
   const result = schema.safeParse(value);
@@ -53,7 +66,7 @@ export function adminRouter(prisma: PrismaClient): Router {
   router.post('/admin/v1/keys', async (req: Request, res: Response, next: NextFunction) => {
     const input = parsed(createKeySchema, req.body, next);
     if (!input) return;
-    const { name, rate_limit_rpm, rate_limit_burst, max_output_tokens_cap } = input;
+    const { name, rate_limit_rpm, rate_limit_burst, max_output_tokens_cap, cache_enabled } = input;
 
     const plainKey = generateKey();
     const kHash = hashKey(plainKey);
@@ -68,6 +81,7 @@ export function adminRouter(prisma: PrismaClient): Router {
           rateLimitRpm: rate_limit_rpm ?? 60,
           rateLimitBurst: rate_limit_burst ?? 20,
           maxOutputTokensCap: max_output_tokens_cap ?? 4096,
+          cacheEnabled: cache_enabled ?? true,
         },
       });
       res.status(201).json({
@@ -154,7 +168,7 @@ export function adminRouter(prisma: PrismaClient): Router {
           AND (${query.api_key_id}::uuid IS NULL OR api_key_id = ${query.api_key_id}::uuid)
         GROUP BY 1, 2 ORDER BY 2 DESC, 1
       `;
-      res.json({ data });
+      res.json({ data: jsonSafe(data) });
     } catch (err) { next(err); }
   });
 
@@ -177,7 +191,7 @@ export function adminRouter(prisma: PrismaClient): Router {
         provider: p,
         circuit_state: breakerStore.get(p).state,
       }));
-      res.json({ data: dbData, circuits });
+      res.json({ data: jsonSafe(dbData), circuits });
     } catch (err) { next(err); }
   });
 

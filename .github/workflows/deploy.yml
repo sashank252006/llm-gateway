@@ -29,14 +29,19 @@ jobs:
   deploy:
     needs: publish
     runs-on: ubuntu-latest
-    if: ${{ secrets.DEPLOY_HOST != '' && secrets.DEPLOY_USER != '' && secrets.DEPLOY_SSH_KEY != '' }}
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
     steps:
-      - uses: appleboy/ssh-action@v1.2.0
+      - name: Deploy when host secrets are configured
+        if: ${{ env.DEPLOY_HOST != '' && env.DEPLOY_USER != '' && env.DEPLOY_SSH_KEY != '' }}
+        uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          host: ${{ env.DEPLOY_HOST }}
+          username: ${{ env.DEPLOY_USER }}
+          key: ${{ env.DEPLOY_SSH_KEY }}
           script: |
             cd /opt/llm-gateway
-            docker compose pull gateway
-            docker compose up -d --no-deps gateway
+            GATEWAY_IMAGE=ghcr.io/${{ github.repository_owner }}/llm-gateway IMAGE_TAG=${{ github.sha }} docker compose pull gateway
+            GATEWAY_IMAGE=ghcr.io/${{ github.repository_owner }}/llm-gateway IMAGE_TAG=${{ github.sha }} docker compose up -d --no-deps gateway

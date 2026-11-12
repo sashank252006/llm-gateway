@@ -5,7 +5,7 @@ import { InMemoryBreakerStore } from '../../../src/resilience/breakerStore.js';
 const adapter = vi.hoisted(() => ({ complete: vi.fn(), stream: vi.fn(), name: 'fake' }));
 vi.mock('../../../src/providers/registry.js', () => ({ getAdapter: () => adapter }));
 
-import { executeWithResilience } from '../../../src/resilience/executor.js';
+import { executeWithResilience, streamWithResilience } from '../../../src/resilience/executor.js';
 
 const request = { model: 'fast', messages: [{ role: 'user' as const, content: 'hello' }] };
 const targets = [
@@ -42,5 +42,26 @@ describe('executeWithResilience', () => {
       expect(error).toMatchObject({ code: 'upstream_error' });
       expect((error as GatewayError).attempts).toHaveLength(2);
     }
+  });
+
+  it('never falls back after a streamed response commits', async () => {
+    adapter.stream.mockImplementationOnce(async function* () {
+      yield { id: 'id', object: 'chat.completion.chunk', created: 0, model: 'one', choices: [{ index: 0, delta: { content: 'A1' }, finish_reason: null }] };
+      throw new UpstreamError('network_error', true, true);
+    });
+    const stream = streamWithResilience(request, targets, context(), new InMemoryBreakerStore());
+    await expect(stream.next()).resolves.toMatchObject({ value: { provider: 'openai' } });
+    await expect(stream.next()).rejects.toMatchObject({ code: 'upstream_error' });
+    expect(adapter.stream).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases a failed half-open probe that returns a provider 400', async () => {
+    let now = 0;
+    const breaker = new InMemoryBreakerStore(1, 100, () => now);
+    breaker.recordFailure('openai');
+    now = 100;
+    adapter.complete.mockRejectedValue(new UpstreamError('http_4xx', false, false, 400));
+    await expect(executeWithResilience(request, [targets[0]!], context(), breaker)).rejects.toMatchObject({ code: 'invalid_request' });
+    expect(breaker.tryProbe('openai')).toBe(true);
   });
 });

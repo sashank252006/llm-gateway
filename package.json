@@ -11,6 +11,7 @@
     "test:typecheck": "tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run",
     "test:integration": "vitest run test/integration",
+    "test:routes": "vitest run test/unit/http/routes.test.ts",
     "test:watch": "vitest",
     "key:create": "tsx src/scripts/createKey.ts"
   },

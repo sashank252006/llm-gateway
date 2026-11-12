@@ -14,6 +14,7 @@ export interface BreakerStore {
   recordFailure(provider: string): void;
   isAllowed(provider: string): boolean;
   tryProbe(provider: string): boolean;
+  releaseProbe(provider: string): void;
   cooldownRemainingMs(provider: string): number;
 }
 
@@ -59,6 +60,11 @@ export class InMemoryBreakerStore implements BreakerStore {
     if (rec.state !== 'half-open' || rec.probeInFlight) return false;
     rec.probeInFlight = true;
     return true;
+  }
+
+  releaseProbe(provider: string): void {
+    const rec = this.getOrCreate(provider);
+    rec.probeInFlight = false;
   }
 
   cooldownRemainingMs(provider: string): number {

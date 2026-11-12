@@ -84,6 +84,20 @@ function breakerFailed(provider: string, breaker: BreakerStore): void {
   updateCircuitMetric(provider, breaker);
 }
 
+function recordClientAbort(
+  attempts: AttemptRecord[],
+  target: Target,
+  startedAt: number,
+): void {
+  attempts.push({
+    attemptNo: attempts.length + 1,
+    provider: target.provider,
+    model: target.model,
+    outcome: 'client_aborted',
+    latencyMs: Date.now() - startedAt,
+  });
+}
+
 export async function executeWithResilience(
   req: ChatRequest,
   targets: Target[],
@@ -107,6 +121,7 @@ export async function executeWithResilience(
     // Circuit breaker check
     const allowed = breakerAllowed(target.provider, breaker);
     const probeAllowed = !allowed && breakerProbe(target.provider, breaker);
+    const releaseProbe = () => { if (probeAllowed) breaker.releaseProbe(target.provider); };
 
     if (!allowed && !probeAllowed) {
       attempts.push({
@@ -123,6 +138,7 @@ export async function executeWithResilience(
     let retryDelayMs: number | undefined;
     for (let attempt = 0; attempt <= env.RETRY_MAX_ATTEMPTS; attempt++) {
       if (combinedSignal.aborted) {
+        releaseProbe();
         throw attachAttempts(
           new GatewayError(
             ctx.signal.aborted ? 'client_aborted' : 'upstream_timeout',
@@ -133,14 +149,16 @@ export async function executeWithResilience(
       }
 
       if (attempt > 0) {
-        await sleep(retryDelayMs ?? exponentialBackoffMs(attempt - 1), combinedSignal, () =>
-          attachAttempts(
+        await sleep(retryDelayMs ?? exponentialBackoffMs(attempt - 1), combinedSignal, () => {
+          releaseProbe();
+          return attachAttempts(
             new GatewayError(
               ctx.signal.aborted ? 'client_aborted' : 'upstream_timeout',
               ctx.signal.aborted ? 'Client disconnected' : 'Overall request deadline exceeded',
             ),
             attempts,
-          )
+          );
+        }
         );
       }
 
@@ -166,6 +184,8 @@ export async function executeWithResilience(
         const latencyMs = Date.now() - start;
 
         if (ctx.signal.aborted || overallDeadline.aborted) {
+          recordClientAbort(attempts, target, start);
+          releaseProbe();
           throw attachAttempts(new GatewayError(
             ctx.signal.aborted ? 'client_aborted' : 'upstream_timeout',
             ctx.signal.aborted ? 'Client disconnected' : 'Overall request deadline exceeded',
@@ -186,15 +206,18 @@ export async function executeWithResilience(
 
           if (!err.retryable || attempt >= env.RETRY_MAX_ATTEMPTS) {
             if (isBreakerFailure(err)) breakerFailed(target.provider, breaker);
+            else releaseProbe();
             if (!err.fallbackable) {
               throw attachAttempts(new GatewayError('invalid_request', 'Provider rejected the request'), attempts);
             }
             break; // try next target
           }
           if (isBreakerFailure(err)) breakerFailed(target.provider, breaker);
+          else releaseProbe();
           retryDelayMs = err.retryAfterMs ?? exponentialBackoffMs(attempt);
           // continue retry loop
         } else {
+          releaseProbe();
           throw err;
         }
       }
@@ -239,6 +262,7 @@ export async function* streamWithResilience(
 
     const allowed = breakerAllowed(target.provider, breaker);
     const probeAllowed = !allowed && breakerProbe(target.provider, breaker);
+    const releaseProbe = () => { if (probeAllowed) breaker.releaseProbe(target.provider); };
 
     if (!allowed && !probeAllowed) {
       attempts.push({
@@ -252,6 +276,7 @@ export async function* streamWithResilience(
     }
 
     const start = Date.now();
+    let committed = false;
     try {
       const adapter = getAdapter(target.provider);
       const iterable = adapter.stream(req, target, callCtx);
@@ -259,7 +284,10 @@ export async function* streamWithResilience(
 
       // Pull first chunk BEFORE commit point — still retryable/fallbackable here
       const first = await it.next();
-      if (first.done) continue;
+      if (first.done) {
+        releaseProbe();
+        continue;
+      }
 
       const latencyMs = Date.now() - start;
       attempts.push({
@@ -271,6 +299,7 @@ export async function* streamWithResilience(
       });
 
       // ---- COMMIT POINT: yield first chunk now ----
+      committed = true;
       yield { chunk: first.value, provider: target.provider, model: target.model, attempts: [...attempts], upstreamStartedAtMs: start, upstreamFirstByteLatencyMs: latencyMs };
 
       // Stream remaining chunks
@@ -286,6 +315,8 @@ export async function* streamWithResilience(
       const latencyMs = Date.now() - start;
 
       if (ctx.signal.aborted || overallDeadline.aborted) {
+        recordClientAbort(attempts, target, start);
+        releaseProbe();
         throw attachAttempts(new GatewayError(
           ctx.signal.aborted ? 'client_aborted' : 'upstream_timeout',
           ctx.signal.aborted ? 'Client disconnected' : 'Overall request deadline exceeded',
@@ -302,10 +333,18 @@ export async function* streamWithResilience(
           latencyMs,
         });
         if (isBreakerFailure(err)) breakerFailed(target.provider, breaker);
+        else releaseProbe();
+
+        // Once a byte has reached the client, changing providers would splice
+        // two answers together. Surface one terminal SSE error instead.
+        if (committed) {
+          throw attachAttempts(new GatewayError('upstream_error', 'Upstream stream failed'), attempts);
+        }
 
         if (!err.fallbackable) throw attachAttempts(new GatewayError('invalid_request', 'Provider rejected the request'), attempts);
         continue;
       }
+      releaseProbe();
       throw err;
     }
   }

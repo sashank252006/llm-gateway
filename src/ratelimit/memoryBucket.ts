@@ -8,6 +8,7 @@ interface Bucket {
 
 export class MemoryBucket implements RateLimitStore {
   private buckets = new Map<string, Bucket>();
+  private checksSinceSweep = 0;
 
   constructor(
     private readonly now: () => number = Date.now,
@@ -22,7 +23,10 @@ export class MemoryBucket implements RateLimitStore {
     cost = 1
   ): Promise<RateLimitResult> {
     const now = this.now();
-    if (this.buckets.size > 0 && this.buckets.size % this.sweepEvery === 0) this.sweep(now);
+    if (++this.checksSinceSweep >= this.sweepEvery) {
+      this.checksSinceSweep = 0;
+      this.sweep(now);
+    }
     let bucket = this.buckets.get(keyId);
 
     if (!bucket) {

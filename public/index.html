@@ -19,15 +19,16 @@
     <form id="auth"><label for="token">Admin token</label><div class="row"><input id="token" type="password" autocomplete="off" required /><button>Load dashboard</button></div></form>
     <section><h2>API keys</h2><pre id="keys">Authenticate to load keys.</pre></section>
     <section><h2>Provider health</h2><pre id="health">Authenticate to load health.</pre></section>
+    <section><h2>Usage last 7 days</h2><pre id="usage">Authenticate to load usage.</pre></section>
     <script>
       const output = (id, data) => document.querySelector(id).textContent = JSON.stringify(data, null, 2);
       document.querySelector('#auth').addEventListener('submit', async (event) => {
         event.preventDefault(); const token = document.querySelector('#token').value;
         const options = { headers: { Authorization: `Bearer ${token}` } };
-        const [keys, health] = await Promise.all(['/admin/v1/keys', '/admin/v1/providers/health'].map(async path => {
+        const [keys, health, usage] = await Promise.all(['/admin/v1/keys', '/admin/v1/providers/health', '/admin/v1/usage'].map(async path => {
           const response = await fetch(path, options); return response.ok ? response.json() : { error: await response.text(), status: response.status };
         }));
-        output('#keys', keys); output('#health', health);
+        output('#keys', keys); output('#health', health); output('#usage', usage);
       });
     </script>
   </body>

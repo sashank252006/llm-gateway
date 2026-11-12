@@ -47,11 +47,12 @@ export class AnthropicAdapter implements ProviderAdapter {
 
   async complete(req: ChatRequest, target: Target, ctx: CallContext): Promise<{ response: ChatResponse; usage: Usage }> {
     const params = this.buildParams(req, target);
+    const timeoutSignal = AbortSignal.timeout(target.timeoutMs);
 
     try {
       const msg = await this.client.messages.create(
         { ...params, stream: false },
-        { signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(target.timeoutMs)]) }
+        { signal: AbortSignal.any([ctx.signal, timeoutSignal]) }
       );
 
       const content = msg.content.find(b => b.type === 'text');
@@ -75,7 +76,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       };
 
       return { response, usage };
-    } catch (err: unknown) { throw classifyAnthropicError(err); }
+    } catch (err: unknown) { throw classifyAnthropicError(err, timeoutSignal, ctx.signal); }
   }
 
   async *stream(req: ChatRequest, target: Target, ctx: CallContext): AsyncIterable<ChatChunk> {
@@ -85,11 +86,12 @@ export class AnthropicAdapter implements ProviderAdapter {
 
     let inputTokens = 0;
     let outputTokens = 0;
+    const timeoutSignal = AbortSignal.timeout(target.timeoutMs);
 
     try {
       const stream = this.client.messages.stream(
         { ...params },
-        { signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(target.timeoutMs)]) }
+        { signal: AbortSignal.any([ctx.signal, timeoutSignal]) }
       );
 
       for await (const event of stream) {
@@ -129,7 +131,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           }
         }
       }
-    } catch (err: unknown) { throw classifyAnthropicError(err); }
+    } catch (err: unknown) { throw classifyAnthropicError(err, timeoutSignal, ctx.signal); }
   }
 }
 
@@ -143,7 +145,8 @@ function retryAfterMs(err: { headers?: { get?: (name: string) => string | null }
   return Number.isFinite(seconds) ? Math.max(0, seconds * 1000) : undefined;
 }
 
-function classifyAnthropicError(err: unknown) {
+function classifyAnthropicError(err: unknown, timeoutSignal?: AbortSignal, clientSignal?: AbortSignal) {
+  if (timeoutSignal?.aborted && !clientSignal?.aborted) return classifyTimeout();
   if (err instanceof Anthropic.APIConnectionTimeoutError) return classifyTimeout();
   if (err instanceof Anthropic.APIUserAbortError) return classifyNetworkError();
   if (err instanceof Anthropic.APIConnectionError) return classifyNetworkError();

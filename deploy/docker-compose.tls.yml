@@ -6,8 +6,9 @@ services:
       - certbot-www:/var/www/certbot:ro
     environment:
       DOMAIN: ${DOMAIN:?set DOMAIN in deploy/.env}
+      ADMIN_ALLOW_CIDR: ${ADMIN_ALLOW_CIDR:?set ADMIN_ALLOW_CIDR in deploy/.env}
     command: >-
-      /bin/sh -c "envsubst '$$DOMAIN' < /etc/nginx/templates/nginx.conf.template > /etc/nginx/nginx.conf && nginx -g 'daemon off;'"
+      /bin/sh -c "envsubst '$$DOMAIN $$ADMIN_ALLOW_CIDR' < /etc/nginx/templates/nginx.conf.template > /tmp/nginx.conf && nginx -c /tmp/nginx.conf -g 'daemon off;'"
     ports:
       - "80:80"
       - "443:443"
