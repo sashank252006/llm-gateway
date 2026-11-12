@@ -17,7 +17,9 @@ export async function cacheGet(redis: Redis, key: string): Promise<CachedEntry |
     return JSON.parse(raw) as CachedEntry;
   } catch (err) {
     logger.warn({ msg: 'Cache get error', error: (err as Error).message });
-    return null;
+    // The caller records this as a skipped cache, not as a miss. A Redis outage
+    // must not make cache-hit metrics look healthier than they are.
+    throw err;
   }
 }
 
@@ -29,8 +31,8 @@ export async function cacheSet(
 ): Promise<void> {
   try {
     const serialized = JSON.stringify(entry);
-    if (serialized.length > MAX_CACHE_SIZE_BYTES) {
-      logger.debug({ msg: 'Cache entry too large, skipping', size: serialized.length });
+    if (Buffer.byteLength(serialized, 'utf8') > MAX_CACHE_SIZE_BYTES) {
+      logger.debug({ msg: 'Cache entry too large, skipping', size: Buffer.byteLength(serialized, 'utf8') });
       return;
     }
     await redis.set(key, serialized, 'EX', ttlSeconds);
@@ -77,4 +79,3 @@ export async function* replayAsStream(entry: CachedEntry): AsyncGenerator<ChatCh
     usage,
   };
 }
-

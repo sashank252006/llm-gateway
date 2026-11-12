@@ -26,6 +26,13 @@ export const overheadSeconds = new Histogram({
   registers: [registry],
 });
 
+export const streamFirstByteOverheadSeconds = new Histogram({
+  name: 'llm_gateway_stream_first_byte_overhead_seconds',
+  help: 'Gateway overhead before the first streamed byte reaches the caller',
+  buckets: [0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25],
+  registers: [registry],
+});
+
 export const upstreamDuration = new Histogram({
   name: 'llm_gateway_upstream_duration_seconds',
   help: 'Per-attempt upstream latency',

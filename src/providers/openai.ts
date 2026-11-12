@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 import type { ProviderAdapter } from './ProviderAdapter.js';
-import type { ChatRequest, ChatChunk, ChatResponse, Target, CallContext, Usage } from '../domain/types.js';
+import type { ChatRequest, ChatChunk, ChatResponse, Target, CallContext, Usage, FinishReason } from '../domain/types.js';
 import { classifyHttpError, classifyNetworkError, classifyTimeout } from './classify.js';
 import { env } from '../config/env.js';
 
@@ -11,6 +11,8 @@ export class OpenAIAdapter implements ProviderAdapter {
   constructor() {
     this.client = new OpenAI({
       apiKey: env.OPENAI_API_KEY,
+      baseURL: env.OPENAI_BASE_URL,
+      maxRetries: 0,
     });
   }
 
@@ -25,7 +27,9 @@ export class OpenAIAdapter implements ProviderAdapter {
         model: target.model,
         messages,
         temperature: req.temperature,
-        top_p: req.top_p,
+        // Keep the portable parameter intersection: several upstream models
+        // reject simultaneous temperature and top_p values.
+        top_p: req.temperature === undefined ? req.top_p : undefined,
         max_tokens: req.max_tokens,
         stop: req.stop,
       }, { signal });
@@ -50,24 +54,13 @@ export class OpenAIAdapter implements ProviderAdapter {
             role: 'assistant',
             content: choice.message.content ?? '',
           },
-          finish_reason: (choice.finish_reason as 'stop' | 'length') ?? 'stop',
+          finish_reason: mapFinishReason(choice.finish_reason),
         }],
         usage,
       };
 
       return { response, usage };
-    } catch (err: unknown) {
-      if (err instanceof OpenAI.APIError) {
-        throw classifyHttpError(err.status ?? 500);
-      }
-      if (err instanceof DOMException && err.name === 'TimeoutError') {
-        throw classifyTimeout();
-      }
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        throw classifyNetworkError();
-      }
-      throw classifyNetworkError();
-    }
+    } catch (err: unknown) { throw classifyOpenAIError(err); }
   }
 
   async *stream(req: ChatRequest, target: Target, ctx: CallContext): AsyncIterable<ChatChunk> {
@@ -82,17 +75,13 @@ export class OpenAIAdapter implements ProviderAdapter {
         model: target.model,
         messages,
         temperature: req.temperature,
-        top_p: req.top_p,
+        top_p: req.temperature === undefined ? req.top_p : undefined,
         max_tokens: req.max_tokens,
         stop: req.stop,
         stream: true,
         stream_options: { include_usage: true },
       }, { signal }) as unknown as AsyncIterable<OpenAI.ChatCompletionChunk>;
-    } catch (err: unknown) {
-      if (err instanceof OpenAI.APIError) throw classifyHttpError(err.status ?? 500);
-      if (err instanceof DOMException && err.name === 'TimeoutError') throw classifyTimeout();
-      throw classifyNetworkError();
-    }
+    } catch (err: unknown) { throw classifyOpenAIError(err); }
 
     const id = `chatcmpl-${ctx.requestId}`;
     const created = Math.floor(Date.now() / 1000);
@@ -111,7 +100,7 @@ export class OpenAIAdapter implements ProviderAdapter {
               role: choice?.delta?.role as 'assistant' | undefined,
               content: choice?.delta?.content ?? undefined,
             },
-            finish_reason: (choice?.finish_reason as 'stop' | 'length' | null) ?? null,
+            finish_reason: mapFinishReason(choice?.finish_reason),
           }],
           usage: chunk.usage ? {
             prompt_tokens: chunk.usage.prompt_tokens,
@@ -120,9 +109,30 @@ export class OpenAIAdapter implements ProviderAdapter {
           } : null,
         };
       }
-    } catch (err: unknown) {
-      if (err instanceof DOMException && err.name === 'TimeoutError') throw classifyTimeout();
-      throw classifyNetworkError();
-    }
+    } catch (err: unknown) { throw classifyOpenAIError(err); }
   }
+}
+
+function retryAfterMs(err: { headers?: Headers | Record<string, string | undefined> }): number | undefined {
+  const value = err.headers instanceof Headers ? err.headers.get('retry-after') : err.headers?.['retry-after'];
+  if (!value) return undefined;
+  const seconds = Number(value);
+  return Number.isFinite(seconds) ? Math.max(0, seconds * 1000) : undefined;
+}
+
+function classifyOpenAIError(err: unknown) {
+  if (err instanceof OpenAI.APIConnectionTimeoutError) return classifyTimeout();
+  if (err instanceof OpenAI.APIUserAbortError) return classifyNetworkError();
+  if (err instanceof OpenAI.APIConnectionError) return classifyNetworkError();
+  if (err instanceof OpenAI.APIError) return classifyHttpError(err.status ?? 500, retryAfterMs(err));
+  if (err instanceof DOMException && err.name === 'TimeoutError') return classifyTimeout();
+  return classifyNetworkError();
+}
+
+function mapFinishReason(reason: string | null | undefined): FinishReason {
+  if (reason === null || reason === undefined) return null;
+  if (reason === 'stop' || reason === 'tool_calls' || reason === 'function_call') return 'stop';
+  if (reason === 'length') return 'length';
+  if (reason === 'content_filter') return 'content_filter';
+  return 'stop';
 }

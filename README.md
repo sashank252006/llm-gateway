@@ -1,6 +1,6 @@
 # LLM Gateway
 
-A production-grade LLM API gateway — TypeScript, Express, PostgreSQL, Redis.
+An LLM API gateway built with TypeScript, Express, PostgreSQL, and Redis.
 
 > One Express service that authenticates callers, applies rate limits, answers from cache, and calls providers through a full resilience layer (retries, circuit breaker, fallback chain).
 
@@ -45,15 +45,14 @@ npm install
 
 # 2. Configure
 cp .env.example .env
-# Edit .env: set OPENAI_API_KEY, ANTHROPIC_API_KEY, ADMIN_TOKEN (min 32 chars)
+# Edit .env: set OPENAI_API_KEY, ANTHROPIC_API_KEY, ADMIN_TOKEN (min 16 chars)
+# Copy deploy/.env.example to deploy/.env and set a strong POSTGRES_PASSWORD.
+# Update DATABASE_URL in .env to use that same password.
 
 # 3. Start infrastructure
 cd deploy && docker compose up -d
 
-# 4. Run database migrations
-DATABASE_URL=postgresql://gateway:gateway@localhost:5432/gateway npx prisma migrate dev --name init
-
-# 5. Create an API key
+# 4. Create an API key (Compose runs prisma migrate deploy before the gateway starts)
 npm run key:create -- --name=my-app
 
 # 6. Call the gateway
@@ -115,7 +114,6 @@ Supported fields: `model` (alias), `messages`, `temperature` (0–1), `top_p`, `
 | `ANTHROPIC_API_KEY` | — | Anthropic API key |
 | `ADMIN_TOKEN` | — | Admin bearer token (≥16 chars) |
 | `LOG_LEVEL` | `info` | Pino log level |
-| `LOG_PROMPTS` | `false` | Log prompt content (opt-in) |
 | `BREAKER_FAILURE_THRESHOLD` | `5` | Failures before circuit opens |
 | `BREAKER_COOLDOWN_MS` | `30000` | Circuit open duration |
 | `RETRY_MAX_ATTEMPTS` | `2` | Max retries per target |
@@ -131,12 +129,12 @@ aliases:
         model: "gpt-4o-mini"
         timeoutMs: 15000
       - provider: anthropic       # fallback
-        model: "claude-haiku-20240307"
+        model: "claude-haiku-5-5"
         timeoutMs: 15000
   smart:
     chain:
       - provider: anthropic
-        model: "claude-3-5-sonnet-20241022"
+        model: "claude-sonnet-4-6"
         timeoutMs: 60000
       - provider: openai
         model: "gpt-4o"
@@ -179,10 +177,12 @@ config/prices.yaml
 deploy/
 ├── docker-compose.yml     # postgres, redis, gateway, nginx, prometheus
 ├── nginx.conf             # proxy_buffering off for SSE
-└── prometheus.yml
+├── prometheus.yml
+├── nginx.tls.conf         # HTTPS and HSTS production template
+└── docker-compose.tls.yml # Certbot production overlay
 test/
-├── unit/                  # errors, cache policy, rate limit, retry
-└── fakes/                 # fake provider server (controllable latency/errors)
+└── unit/                  # errors, cache policy, rate limit, retry, breaker
+k6/                        # repeatable cache, failover, and overhead benchmarks
 ```
 
 ---
@@ -194,6 +194,8 @@ npm run dev        # tsx watch — hot reload
 npm run typecheck  # tsc --noEmit
 npm test           # vitest unit tests
 npm run build      # compile to dist/
+npm run lint       # ESLint 9 flat-config check
+npm run test:typecheck # type-check source and tests
 ```
 
 ---
@@ -203,14 +205,18 @@ npm run build      # compile to dist/
 ```bash
 cd deploy
 docker compose up -d
-# Gateway available at http://localhost:3000
-# Prometheus at http://localhost:9090
 # Nginx proxy at http://localhost:80
 ```
 
 The gateway depends on Postgres and Redis with `condition: service_healthy`.
 
 **Nginx essentials for SSE:** `proxy_buffering off` on `/v1/` — without this, streaming chunks arrive in bursts.
+
+For Internet-facing deployment, replace the domain and email in `deploy/.env`, obtain a certificate with `docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.tls.yml --profile tls run --rm certbot`, then start the same two Compose files without the `certbot` profile. The TLS overlay enables HTTPS, HSTS, ACME validation, request forwarding headers, and the admin network allowlist.
+
+## Benchmarks
+
+The repository includes repeatable k6 scenarios in `k6/`. Run them only against a prepared environment: `k6 run -e GATEWAY_URL=https://gateway.example.com -e API_KEY=lgw_live_x k6/cache-hit-rate.js`. Results are intentionally not claimed until measured on the target host; record cache hit rate from `llm_gateway_cache_requests_total`, failover latency from the k6 summary, and overhead from `llm_gateway_overhead_seconds`.
 
 ---
 
@@ -225,4 +231,3 @@ The gateway depends on Postgres and Redis with `condition: service_healthy`.
 | Cache at temperature=0 only | Determinism first. Caching non-zero temperature silently changes behaviour. |
 | Streaming commit point | Wait for first upstream byte before writing response headers — keeps fallback possible for all connection and early-5xx errors. |
 | Routing config in a file | Reviewable in git, Zod-validated at boot, no admin CRUD surface to build and secure. |
-

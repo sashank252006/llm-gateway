@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLM Gateway Admin</title>
+    <style>
+      :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #101720; color: #eaf0f7; }
+      body { max-width: 980px; margin: 0 auto; padding: 48px 24px; }
+      header, form, section { background: #17212e; border: 1px solid #29394c; border-radius: 12px; padding: 24px; margin-bottom: 20px; }
+      h1 { margin: 0 0 8px; } p { color: #aebdcd; } input, button { font: inherit; border-radius: 7px; padding: 10px 12px; border: 1px solid #3a516a; }
+      input { width: min(500px, 95%); background: #0e1620; color: #fff; } button { background: #57c4a7; color: #06251d; border: 0; font-weight: 700; cursor: pointer; }
+      pre { overflow: auto; background: #0e1620; padding: 16px; border-radius: 8px; min-height: 120px; }
+      .row { display: flex; gap: 10px; flex-wrap: wrap; } code { color: #83d6ff; }
+    </style>
+  </head>
+  <body>
+    <header><h1>LLM Gateway Admin</h1><p>Enter an admin bearer token locally. It is held only in this browser tab and sent to the gateway over the current HTTPS connection.</p></header>
+    <form id="auth"><label for="token">Admin token</label><div class="row"><input id="token" type="password" autocomplete="off" required /><button>Load dashboard</button></div></form>
+    <section><h2>API keys</h2><pre id="keys">Authenticate to load keys.</pre></section>
+    <section><h2>Provider health</h2><pre id="health">Authenticate to load health.</pre></section>
+    <script>
+      const output = (id, data) => document.querySelector(id).textContent = JSON.stringify(data, null, 2);
+      document.querySelector('#auth').addEventListener('submit', async (event) => {
+        event.preventDefault(); const token = document.querySelector('#token').value;
+        const options = { headers: { Authorization: `Bearer ${token}` } };
+        const [keys, health] = await Promise.all(['/admin/v1/keys', '/admin/v1/providers/health'].map(async path => {
+          const response = await fetch(path, options); return response.ok ? response.json() : { error: await response.text(), status: response.status };
+        }));
+        output('#keys', keys); output('#health', health);
+      });
+    </script>
+  </body>
+</html>

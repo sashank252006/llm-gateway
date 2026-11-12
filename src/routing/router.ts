@@ -1,4 +1,4 @@
-import type { Target, RouteAlias } from '../domain/types.js';
+import type { RouteAlias } from '../domain/types.js';
 import { loadRouteConfig } from '../config/routing.js';
 import { GatewayError } from '../domain/errors.js';
 

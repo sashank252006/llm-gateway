@@ -9,8 +9,15 @@ import { logger } from './observability/logger.js';
 import { initUsageRecorder, flushAndShutdown } from './usage/recorder.js';
 
 async function main() {
-  loadRouteConfig();
-  loadPrices();
+  const routes = loadRouteConfig();
+  const prices = loadPrices();
+  for (const [alias, route] of Object.entries(routes.aliases)) {
+    for (const target of route.chain) {
+      if (!prices[target.model]) {
+        throw new Error(`Route alias ${alias} references ${target.model}, which has no price entry`);
+      }
+    }
+  }
 
   const prisma = getPrisma();
   const redis = getRedis();
@@ -52,4 +59,3 @@ main().catch((err) => {
   console.error('Fatal error during startup:', err);
   process.exit(1);
 });
-

@@ -14,7 +14,23 @@ export const ChatRequestSchema = z.object({
   stop: z.union([z.string(), z.array(z.string()).max(4)]).optional(),
   stream: z.boolean().optional(),
   stream_options: z.object({ include_usage: z.boolean().optional() }).optional(),
-}).strict();
+}).strict().superRefine((request, context) => {
+  const firstNonSystem = request.messages.findIndex((message) => message.role !== 'system');
+  const systemMessages = firstNonSystem === -1 ? request.messages : request.messages.slice(0, firstNonSystem);
+  if (systemMessages.length !== request.messages.filter((message) => message.role === 'system').length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['messages'], message: 'system messages must appear before all conversation messages' });
+  }
+  const conversation = request.messages.filter((message) => message.role !== 'system');
+  if (conversation.length === 0 || conversation[0]?.role !== 'user') {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['messages'], message: 'a conversation must start with a user message' });
+  }
+  for (let index = 1; index < conversation.length; index++) {
+    if (conversation[index]?.role === conversation[index - 1]?.role) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ['messages', index], message: 'user and assistant messages must alternate' });
+      break;
+    }
+  }
+});
 
 export type ChatRequestInput = z.infer<typeof ChatRequestSchema>;
 

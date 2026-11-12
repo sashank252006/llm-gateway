@@ -9,7 +9,8 @@ export type GatewayErrorCode =
   | 'upstream_error'
   | 'all_providers_unavailable'
   | 'upstream_timeout'
-  | 'auth_unavailable';
+  | 'auth_unavailable'
+  | 'client_aborted';
 
 export type GatewayErrorType =
   | 'invalid_request_error'
@@ -29,6 +30,7 @@ const CODE_MAP: Record<GatewayErrorCode, { status: number; type: GatewayErrorTyp
   all_providers_unavailable: { status: 503, type: 'api_error' },
   upstream_timeout: { status: 504, type: 'api_error' },
   auth_unavailable: { status: 503, type: 'api_error' },
+  client_aborted: { status: 499, type: 'api_error' },
 };
 
 export class GatewayError extends Error {
@@ -37,6 +39,8 @@ export class GatewayError extends Error {
   public readonly errorType: GatewayErrorType;
   public readonly param?: string;
   public readonly retryAfterSeconds?: number;
+  /** Attached by the executor so failed calls remain observable. */
+  public attempts?: unknown[];
 
   constructor(
     code: GatewayErrorCode,

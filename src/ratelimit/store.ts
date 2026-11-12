@@ -1,5 +1,3 @@
-import type Redis from 'ioredis';
-
 export interface RateLimitResult {
   allowed: boolean;
   tokensRemaining: number;
@@ -14,4 +12,3 @@ export interface RateLimitStore {
     cost?: number
   ): Promise<RateLimitResult>;
 }
-

@@ -1,4 +1,5 @@
 import express from 'express';
+import { fileURLToPath } from 'url';
 import { requestIdMiddleware } from './http/middleware/requestId.js';
 import { errorHandler } from './http/middleware/errorHandler.js';
 import { healthRouter } from './http/routes/health.js';
@@ -12,20 +13,18 @@ import type { Redis } from 'ioredis';
 export function createApp(deps: { prisma: PrismaClient; redis: Redis }) {
   const app = express();
 
-  app.set('trust proxy', true);
-
   app.use(requestIdMiddleware);
-  app.use(express.json({ limit: '1mb' }));
 
   // Health & metrics (no auth)
-  app.use(healthRouter(deps.prisma));
+  app.use(healthRouter(deps.prisma, deps.redis));
   app.use(metricsRouter());
 
   // Public API
-  app.use(modelsRouter());
+  app.use(modelsRouter(deps.prisma));
   app.use(chatCompletionsRouter(deps));
 
   // Admin API
+  app.use('/admin', express.static(fileURLToPath(new URL('../public/', import.meta.url))));
   app.use(adminRouter(deps.prisma));
 
   // Error handler must be LAST
@@ -33,4 +32,3 @@ export function createApp(deps: { prisma: PrismaClient; redis: Redis }) {
 
   return app;
 }
-

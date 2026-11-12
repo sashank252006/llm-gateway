@@ -19,9 +19,16 @@ export function getKeyPrefix(key: string): string {
   return key.substring(0, 12);
 }
 
-const keyCache = new LRUCache<string, ApiKeyContext | 'revoked' | 'not_found'>({
+interface CachedKey {
+  context: ApiKeyContext;
+  freshUntil: number;
+}
+
+const keyCache = new LRUCache<string, CachedKey | 'revoked'>({
   max: env.AUTH_LRU_MAX,
-  ttl: env.AUTH_LRU_TTL_MS,
+  // Keep successful lookups briefly past freshness so a database outage does
+  // not invalidate known callers all at once.
+  ttl: env.AUTH_LRU_TTL_MS + env.AUTH_STALE_TTL_MS,
 });
 
 export async function lookupKey(
@@ -30,11 +37,11 @@ export async function lookupKey(
 ): Promise<ApiKeyContext> {
   const cached = keyCache.get(keyHash);
 
-  if (cached === 'revoked' || cached === 'not_found') {
+  if (cached === 'revoked') {
     throw new GatewayError('invalid_api_key', 'Invalid or revoked API key');
   }
-  if (cached) {
-    return cached;
+  if (cached && Date.now() < cached.freshUntil) {
+    return cached.context;
   }
 
   let row: {
@@ -62,11 +69,14 @@ export async function lookupKey(
     });
   } catch (err) {
     logger.warn({ msg: 'DB lookup failed for key', error: (err as Error).message });
+    if (cached && Date.now() < cached.freshUntil + env.AUTH_STALE_TTL_MS) {
+      logger.warn({ msg: 'Serving stale API-key authorization during DB outage', apiKeyId: cached.context.id });
+      return cached.context;
+    }
     throw new GatewayError('auth_unavailable', 'Auth service temporarily unavailable');
   }
 
   if (!row) {
-    keyCache.set(keyHash, 'not_found');
     throw new GatewayError('invalid_api_key', 'Invalid or revoked API key');
   }
 
@@ -84,11 +94,10 @@ export async function lookupKey(
     cacheEnabled: row.cacheEnabled,
   };
 
-  keyCache.set(keyHash, context);
+  keyCache.set(keyHash, { context, freshUntil: Date.now() + env.AUTH_LRU_TTL_MS });
   return context;
 }
 
 export function evictKey(keyHash: string): void {
   keyCache.delete(keyHash);
 }
-

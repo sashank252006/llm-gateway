@@ -1,12 +1,10 @@
 import { type Redis } from 'ioredis';
-import { readFileSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
 import type { RateLimitStore, RateLimitResult } from './store.js';
 import { logger } from '../observability/logger.js';
+import { tokenBucketLua } from './lua.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const luaScript = readFileSync(join(__dirname, 'bucket.lua'), 'utf-8');
+const luaScript = tokenBucketLua;
+let lastScriptReloadWarningAt = 0;
 
 export class RedisBucket implements RateLimitStore {
   private redis: Redis;
@@ -46,8 +44,14 @@ export class RedisBucket implements RateLimitStore {
         tokensRemaining: result[1],
         retryAfterMs: result[2],
       };
-    } catch {
-      logger.warn({ msg: 'EVALSHA failed, retrying with EVAL' });
+    } catch (err) {
+      // EVAL is only a recovery path for Redis losing its script cache. Retrying
+      // connection failures doubles user-visible latency while Redis is down.
+      if (!(err instanceof Error) || !err.message.includes('NOSCRIPT')) throw err;
+      if (Date.now() - lastScriptReloadWarningAt > 60_000) {
+        lastScriptReloadWarningAt = Date.now();
+        logger.warn({ msg: 'Redis script cache was cleared; reloading rate-limit script' });
+      }
       this.sha = null;
       const result = (await this.redis.eval(
         luaScript,
@@ -66,4 +70,3 @@ export class RedisBucket implements RateLimitStore {
     }
   }
 }
-

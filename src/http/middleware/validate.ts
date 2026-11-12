@@ -14,7 +14,9 @@ export function validateChatRequest(req: Request, _res: Response, next: NextFunc
         })
       );
     }
-    return next(new GatewayError('invalid_request', issue?.message ?? 'Invalid request'));
+    const param = issue?.path.join('.') || undefined;
+    const message = param ? `${param}: ${issue?.message ?? 'Invalid value'}` : issue?.message ?? 'Invalid request';
+    return next(new GatewayError('invalid_request', message, { param }));
   }
 
   const apiKey = req.apiKey;
@@ -30,4 +32,3 @@ export function validateChatRequest(req: Request, _res: Response, next: NextFunc
   req.body = result.data;
   next();
 }
-

@@ -20,6 +20,8 @@ export interface Usage {
   total_tokens: number;
 }
 
+export type FinishReason = 'stop' | 'length' | 'content_filter' | null;
+
 export interface ChatResponse {
   id: string;
   object: 'chat.completion';
@@ -28,7 +30,7 @@ export interface ChatResponse {
   choices: Array<{
     index: number;
     message: Message;
-    finish_reason: 'stop' | 'length' | null;
+    finish_reason: FinishReason;
   }>;
   usage: Usage;
 }
@@ -41,7 +43,7 @@ export interface ChatChunk {
   choices: Array<{
     index: number;
     delta: { role?: 'assistant'; content?: string };
-    finish_reason: 'stop' | 'length' | null;
+    finish_reason: FinishReason;
   }>;
   usage?: Usage | null;
 }

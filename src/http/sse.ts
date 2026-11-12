@@ -17,8 +17,23 @@ export class SSEWriter {
     this.res.flushHeaders();
   }
 
-  write(data: unknown): boolean {
-    return this.res.write(`data: ${JSON.stringify(data)}\n\n`);
+  async write(data: unknown, signal?: AbortSignal): Promise<void> {
+    if (this.res.write(`data: ${JSON.stringify(data)}\n\n`)) return;
+    await new Promise<void>((resolve, reject) => {
+      const stall = setTimeout(() => reject(new Error('SSE client stopped reading')), 30_000);
+      const cleanup = () => {
+        clearTimeout(stall);
+        this.res.removeListener('drain', drained);
+        this.res.removeListener('close', closed);
+        signal?.removeEventListener('abort', aborted);
+      };
+      const drained = () => { cleanup(); resolve(); };
+      const closed = () => { cleanup(); reject(new Error('SSE response closed')); };
+      const aborted = () => { cleanup(); reject(new Error('SSE write aborted')); };
+      this.res.once('drain', drained);
+      this.res.once('close', closed);
+      signal?.addEventListener('abort', aborted, { once: true });
+    });
   }
 
   done(): void {
@@ -35,4 +50,3 @@ export class SSEWriter {
     return this.committed;
   }
 }
-

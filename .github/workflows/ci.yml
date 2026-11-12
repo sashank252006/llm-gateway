@@ -1,15 +1,13 @@
 name: CI
 
 on:
-  push:
-    branches: [main, develop]
   pull_request:
+  push:
     branches: [main]
 
 jobs:
-  build-and-test:
+  verify:
     runs-on: ubuntu-latest
-
     services:
       postgres:
         image: postgres:16-alpine
@@ -17,51 +15,30 @@ jobs:
           POSTGRES_USER: gateway
           POSTGRES_PASSWORD: gateway
           POSTGRES_DB: gateway
+        ports: ['5432:5432']
         options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-
+          --health-cmd "pg_isready -U gateway" --health-interval 5s --health-timeout 5s --health-retries 10
       redis:
         image: redis:7-alpine
+        ports: ['6379:6379']
         options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 6379:6379
-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://gateway:gateway@localhost:5432/gateway
+      REDIS_URL: redis://localhost:6379
+      ADMIN_TOKEN: ci-admin-token-at-least-16
+      OPENAI_API_KEY: ci-placeholder
+      ANTHROPIC_API_KEY: ci-placeholder
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Run database migrations
-        run: npx prisma migrate deploy
-        env:
-          DATABASE_URL: postgresql://gateway:gateway@localhost:5432/gateway
-
-      - name: Run tests
-        run: npm test
-        env:
-          DATABASE_URL: postgresql://gateway:gateway@localhost:5432/gateway
-          REDIS_URL: redis://localhost:6379
-          ADMIN_TOKEN: test-admin-token-1234567890123456
-          NODE_ENV: test
-
-      - name: Build Docker image
-        run: docker build -t llm-gateway:${{ github.sha }} .
-
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test:typecheck
+      - run: npx prisma migrate deploy
+      - run: npm test
+      - run: RUN_INTEGRATION=1 npm run test:integration
+      - run: npm run build
+      - run: docker build -t llm-gateway:${{ github.sha }} .

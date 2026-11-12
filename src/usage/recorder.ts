@@ -25,10 +25,17 @@ export interface UsageRecord {
   upstreamLatencyMs?: number;
   ttfbMs?: number;
   savedCostUsd?: number;
+  costUsd?: number;
   attemptRecords: AttemptRecord[];
 }
 
-const eventQueue: UsageRecord[] = [];
+interface QueuedUsageRecord {
+  record: UsageRecord;
+  failures: number;
+}
+
+const eventQueue: QueuedUsageRecord[] = [];
+const unknownPriceModels = new Set<string>();
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let prismaRef: PrismaClient | null = null;
 
@@ -45,13 +52,13 @@ export function enqueueUsage(record: UsageRecord): void {
     eventQueue.shift();
     usageRowsDropped.inc();
   }
-  eventQueue.push(record);
+  eventQueue.push({ record, failures: 0 });
   usageQueueDepth.set(eventQueue.length);
 
-  if (record.inputTokens && record.provider) {
+  if (!record.cacheHit && record.inputTokens && record.provider) {
     tokensTotal.inc({ provider: record.provider, direction: 'input' }, record.inputTokens);
   }
-  if (record.outputTokens && record.provider) {
+  if (!record.cacheHit && record.outputTokens && record.provider) {
     tokensTotal.inc({ provider: record.provider, direction: 'output' }, record.outputTokens);
   }
 
@@ -63,18 +70,23 @@ export function enqueueUsage(record: UsageRecord): void {
 async function flush(): Promise<void> {
   if (!prismaRef || eventQueue.length === 0) return;
 
-  const batch = eventQueue.splice(0, env.USAGE_FLUSH_BATCH_SIZE);
+  const queuedBatch = eventQueue.splice(0, env.USAGE_FLUSH_BATCH_SIZE);
+  const batch = queuedBatch.map((queued) => queued.record);
   usageQueueDepth.set(eventQueue.length);
 
   try {
     const events = batch.map((r) => {
-      const costUsd =
-        r.provider && r.model && r.inputTokens !== undefined && r.outputTokens !== undefined
+      const costUsd = r.costUsd ??
+        (r.provider && r.model && r.inputTokens !== undefined && r.outputTokens !== undefined
           ? computeCost(r.provider, r.model, r.inputTokens, r.outputTokens)
-          : null;
+          : null);
 
-      if (costUsd !== null && r.provider) {
-        costUsdTotal.inc({ provider: r.provider }, costUsd);
+      if (r.provider && r.model && r.inputTokens !== undefined && r.outputTokens !== undefined && costUsd === null) {
+        const modelKey = `${r.provider}:${r.model}`;
+        if (!unknownPriceModels.has(modelKey)) {
+          unknownPriceModels.add(modelKey);
+          logger.warn({ msg: 'No configured price for model; cost remains null', provider: r.provider, model: r.model });
+        }
       }
 
       return {
@@ -101,8 +113,6 @@ async function flush(): Promise<void> {
       };
     });
 
-    await prismaRef.usageEvent.createMany({ data: events, skipDuplicates: true });
-
     const attemptRows = batch.flatMap((r) =>
       r.attemptRecords.map((a, i) => ({
         requestId: r.requestId,
@@ -116,12 +126,31 @@ async function flush(): Promise<void> {
       }))
     );
 
-    if (attemptRows.length > 0) {
-      await prismaRef.providerAttempt.createMany({ data: attemptRows });
+    await prismaRef.$transaction(async (tx) => {
+      await tx.usageEvent.createMany({ data: events, skipDuplicates: true });
+      if (attemptRows.length > 0) await tx.providerAttempt.createMany({ data: attemptRows });
+      const keyIds = [...new Set(batch.map((record) => record.apiKeyId))];
+      await Promise.all(keyIds.map((id) => tx.apiKey.updateMany({ where: { id }, data: { lastUsedAt: new Date() } })));
+    });
+
+    // Only count committed cost; a re-queued batch must not inflate metrics.
+    for (const [index, record] of batch.entries()) {
+      const cost = events[index]!.costUsd;
+      if (typeof cost === 'number' && cost > 0 && record.provider) {
+        costUsdTotal.inc({ provider: record.provider }, cost);
+      }
     }
   } catch (err) {
     logger.error({ msg: 'Usage flush error', error: (err as Error).message });
-    const toRestore = batch.slice(0, Math.max(0, env.USAGE_QUEUE_MAX - eventQueue.length));
+    const retryable = queuedBatch
+      .map((queued) => ({ ...queued, failures: queued.failures + 1 }))
+      .filter((queued) => queued.failures <= 3);
+    const dropped = queuedBatch.length - retryable.length;
+    if (dropped > 0) {
+      usageRowsDropped.inc(dropped);
+      logger.error({ msg: 'Dropping usage rows after repeated write failures', count: dropped });
+    }
+    const toRestore = retryable.slice(0, Math.max(0, env.USAGE_QUEUE_MAX - eventQueue.length));
     eventQueue.unshift(...toRestore);
     usageQueueDepth.set(eventQueue.length);
   }
@@ -129,6 +158,9 @@ async function flush(): Promise<void> {
 
 export async function flushAndShutdown(): Promise<void> {
   if (flushTimer) clearInterval(flushTimer);
-  await flush();
+  const deadline = Date.now() + 25_000;
+  while (eventQueue.length > 0 && Date.now() < deadline) {
+    await flush();
+  }
+  if (eventQueue.length > 0) logger.error({ msg: 'Usage rows left unflushed at shutdown', count: eventQueue.length });
 }
-

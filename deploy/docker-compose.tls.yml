@@ -1,0 +1,27 @@
+services:
+  nginx:
+    volumes:
+      - ./nginx.tls.conf:/etc/nginx/templates/nginx.conf.template:ro
+      - certbot-etc:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot:ro
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in deploy/.env}
+    command: >-
+      /bin/sh -c "envsubst '$$DOMAIN' < /etc/nginx/templates/nginx.conf.template > /etc/nginx/nginx.conf && nginx -g 'daemon off;'"
+    ports:
+      - "80:80"
+      - "443:443"
+  certbot:
+    image: certbot/certbot:v2.11.0
+    profiles: ["tls"]
+    volumes:
+      - certbot-etc:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    command: >-
+      certonly --webroot --webroot-path=/var/www/certbot
+      --email ${CERTBOT_EMAIL:?set CERTBOT_EMAIL in deploy/.env}
+      --agree-tos --no-eff-email -d ${DOMAIN:?set DOMAIN in deploy/.env}
+
+volumes:
+  certbot-etc:
+  certbot-www:

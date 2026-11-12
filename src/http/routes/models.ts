@@ -1,10 +1,12 @@
 import { Router } from 'express';
+import type { PrismaClient } from '@prisma/client';
 import { getAliases } from '../../routing/router.js';
+import { authMiddleware } from '../middleware/auth.js';
 
-export function modelsRouter(): Router {
+export function modelsRouter(prisma: PrismaClient): Router {
   const router = Router();
 
-  router.get('/v1/models', (_req, res) => {
+  router.get('/v1/models', authMiddleware(prisma), (_req, res) => {
     const aliases = getAliases();
     res.json({
       object: 'list',
@@ -19,4 +21,3 @@ export function modelsRouter(): Router {
 
   return router;
 }
-

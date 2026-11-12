@@ -1,4 +1,4 @@
-import { Router, Request, Response, NextFunction } from 'express';
+import express, { Router, Request, Response, NextFunction } from 'express';
 import type { PrismaClient } from '@prisma/client';
 import type { Redis } from 'ioredis';
 import { authMiddleware } from '../middleware/auth.js';
@@ -15,53 +15,51 @@ import { SSEWriter } from '../sse.js';
 import { enqueueUsage } from '../../usage/recorder.js';
 import { env } from '../../config/env.js';
 import {
-  requestsTotal,
-  requestDuration,
   cacheRequestsTotal,
   rateLimitedTotal,
-  overheadSeconds,
+  streamFirstByteOverheadSeconds,
 } from '../../observability/metrics.js';
 import type { ChatRequest, Usage } from '../../domain/types.js';
+import type { AttemptRecord } from '../../resilience/executor.js';
+import { computeCost } from '../../usage/cost.js';
 
 export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis }): Router {
   const router = Router();
   const redisBucket = new RedisBucket(deps.redis);
   const memBucket = new MemoryBucket();
 
+  const rateLimit = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const apiKey = req.apiKey!;
+    const refillPerSecond = apiKey.rateLimitRpm / 60;
+    try {
+      let result;
+      try {
+        result = await redisBucket.check(apiKey.id, apiKey.rateLimitBurst, refillPerSecond);
+      } catch {
+        result = await memBucket.check(apiKey.id, apiKey.rateLimitBurst, refillPerSecond);
+      }
+      if (!result.allowed) {
+        rateLimitedTotal.inc();
+        const retryAfterSeconds = Math.ceil(result.retryAfterMs / 1000);
+        return next(new GatewayError('rate_limit_exceeded', `Rate limit exceeded. Retry after ${retryAfterSeconds} seconds.`, { retryAfterSeconds }));
+      }
+      res.setHeader('x-ratelimit-limit', apiKey.rateLimitRpm);
+      res.setHeader('x-ratelimit-remaining', result.tokensRemaining);
+      next();
+    } catch (err) { next(err); }
+  };
+
   router.post(
     '/v1/chat/completions',
     authMiddleware(deps.prisma),
+    rateLimit,
+    express.json({ limit: env.BODY_LIMIT }),
     validateChatRequest,
     async (req: Request, res: Response, next: NextFunction) => {
       const startTime = req.startTime ?? Date.now();
       const apiKey = req.apiKey!;
       const body = req.body as ChatRequest;
       const alias = body.model;
-
-      // Rate limiting
-      const refillPerSecond = apiKey.rateLimitRpm / 60;
-      let rateLimitResult;
-
-      try {
-        rateLimitResult = await redisBucket.check(apiKey.id, apiKey.rateLimitBurst, refillPerSecond);
-      } catch {
-        rateLimitResult = await memBucket.check(apiKey.id, apiKey.rateLimitBurst, refillPerSecond);
-      }
-
-      if (!rateLimitResult.allowed) {
-        rateLimitedTotal.inc();
-        const retryAfterSec = Math.ceil(rateLimitResult.retryAfterMs / 1000);
-        return next(
-          new GatewayError(
-            'rate_limit_exceeded',
-            `Rate limit exceeded. Retry after ${retryAfterSec} seconds.`,
-            { retryAfterSeconds: retryAfterSec }
-          )
-        );
-      }
-
-      res.setHeader('x-ratelimit-limit', apiKey.rateLimitRpm);
-      res.setHeader('x-ratelimit-remaining', rateLimitResult.tokensRemaining);
 
       // Resolve alias
       let route;
@@ -100,18 +98,16 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
             res.setHeader('x-gateway-attempts', '0');
 
             const latencyMs = Date.now() - startTime;
-            requestsTotal.inc({ alias, http_status: '200', cache: 'hit' });
-            requestDuration.observe({ alias, stream: String(!!body.stream) }, latencyMs / 1000);
 
             if (body.stream) {
               const sse = new SSEWriter(res);
               sse.start();
               for await (const chunk of replayAsStream(cached)) {
                 if (!body.stream_options?.include_usage && chunk.usage) {
-                  const { usage: _u, ...rest } = chunk;
-                  sse.write(rest);
+                  const { usage: _usage, ...rest } = chunk;
+                  await sse.write(rest);
                 } else {
-                  sse.write(chunk);
+                  await sse.write(chunk);
                 }
               }
               sse.done();
@@ -134,6 +130,8 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
               httpStatus: 200,
               inputTokens: cached.response.usage.prompt_tokens,
               outputTokens: cached.response.usage.completion_tokens,
+              costUsd: 0,
+              savedCostUsd: computeCost(cached.provider, cached.model, cached.response.usage.prompt_tokens, cached.response.usage.completion_tokens) ?? 0,
               latencyMs,
               attemptRecords: [],
             });
@@ -150,7 +148,11 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
       }
 
       const abortController = new AbortController();
-      req.on('close', () => abortController.abort());
+      // IncomingMessage's close event is not a reliable client-disconnect
+      // signal after the request body has been consumed. Response close is.
+      res.on('close', () => {
+        if (!res.writableEnded) abortController.abort();
+      });
       const callCtx = { signal: abortController.signal, requestId: req.requestId };
 
       // ── Streaming ──────────────────────────────────────────────────────────
@@ -163,10 +165,13 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
         let lastUsage: Usage | undefined;
         let finalProvider = '';
         let finalModel = '';
-        let finalAttempts: { attemptNo: number }[] = [];
+        let finalAttempts: AttemptRecord[] = [];
+        let finishReason: 'stop' | 'length' | 'content_filter' | undefined;
+        let streamInterrupted = false;
+        let upstreamStartedAtMs: number | undefined;
 
         try {
-          for await (const { chunk, provider, model, attempts } of streamWithResilience(
+          for await (const { chunk, provider, model, attempts, upstreamStartedAtMs: streamStartedAtMs, upstreamFirstByteLatencyMs } of streamWithResilience(
             body,
             route.chain,
             callCtx
@@ -174,10 +179,12 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
             finalProvider = provider;
             finalModel = model;
             finalAttempts = attempts;
+            upstreamStartedAtMs = streamStartedAtMs;
 
             if (!committed) {
               committed = true;
               ttfbMs = Date.now() - startTime;
+              streamFirstByteOverheadSeconds.observe(Math.max(0, ttfbMs - upstreamFirstByteLatencyMs) / 1000);
               res.setHeader('x-gateway-alias', alias);
               res.setHeader('x-gateway-provider', provider);
               res.setHeader('x-gateway-cache', cacheResult);
@@ -186,39 +193,47 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
               sse.start();
             }
 
-            if (chunk.usage) {
-              lastUsage = chunk.usage;
-              upstreamLatencyMs = Date.now() - startTime - (ttfbMs ?? 0);
-            }
+            if (chunk.usage) lastUsage = chunk.usage;
             if (chunk.choices[0]?.delta.content) {
               accContent += chunk.choices[0].delta.content;
             }
+            if (chunk.choices[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
 
             const toSend =
               !body.stream_options?.include_usage && chunk.usage
                 ? { ...chunk, usage: undefined }
                 : chunk;
-            sse.write(toSend);
+            await sse.write(toSend, abortController.signal);
           }
           sse.done();
         } catch (err) {
           if (committed) {
+            streamInterrupted = true;
+            finalAttempts = (err instanceof GatewayError && Array.isArray(err.attempts) ? err.attempts : finalAttempts) as AttemptRecord[];
             sse.error({
               message: err instanceof Error ? err.message : 'Stream error',
               code: err instanceof GatewayError ? err.code : 'internal_error',
               request_id: req.requestId,
             });
           } else {
+            const attempts = (err instanceof GatewayError && Array.isArray(err.attempts) ? err.attempts : []) as AttemptRecord[];
+            const latencyMs = Date.now() - startTime;
+            res.locals.upstreamLatencyMs = attempts.reduce((total, attempt) => total + attempt.latencyMs, 0);
+            enqueueUsage({
+              requestId: req.requestId, apiKeyId: apiKey.id, createdAt: new Date(startTime), alias,
+              stream: true, cacheHit: false, fallbackUsed: attempts.length > 1, attempts: attempts.length,
+              status: 'error', httpStatus: err instanceof GatewayError ? err.httpStatus : 500,
+              errorCode: err instanceof GatewayError ? err.code : 'internal_error', latencyMs, attemptRecords: attempts,
+            });
             return next(err);
           }
         }
 
         const latencyMs = Date.now() - startTime;
-        requestsTotal.inc({ alias, http_status: '200', cache: cacheResult.toLowerCase() });
-        requestDuration.observe({ alias, stream: 'true' }, latencyMs / 1000);
-        overheadSeconds.observe((latencyMs - upstreamLatencyMs) / 1000);
+        upstreamLatencyMs = upstreamStartedAtMs === undefined ? 0 : Date.now() - upstreamStartedAtMs;
+        res.locals.upstreamLatencyMs = upstreamLatencyMs;
 
-        if (cacheDecision.cacheable && lastUsage && accContent && cacheKey) {
+        if (!streamInterrupted && cacheDecision.cacheable && lastUsage && accContent && finishReason === 'stop' && cacheKey) {
           void cacheSet(
             deps.redis,
             cacheKey,
@@ -228,7 +243,7 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
                 object: 'chat.completion',
                 created: Math.floor(startTime / 1000),
                 model: finalModel,
-                choices: [{ index: 0, message: { role: 'assistant', content: accContent }, finish_reason: 'stop' }],
+                choices: [{ index: 0, message: { role: 'assistant', content: accContent }, finish_reason: finishReason }],
                 usage: lastUsage,
               },
               provider: finalProvider,
@@ -249,7 +264,7 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
           cacheHit: false,
           fallbackUsed: finalAttempts.length > 1,
           attempts: finalAttempts.length,
-          status: committed ? 'ok' : 'error',
+          status: abortController.signal.aborted ? 'client_aborted' : streamInterrupted ? 'stream_interrupted' : committed ? 'ok' : 'error',
           httpStatus: 200,
           inputTokens: lastUsage?.prompt_tokens,
           outputTokens: lastUsage?.completion_tokens,
@@ -274,9 +289,7 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
         res.setHeader('x-gateway-fallback', String(result.fallbackUsed));
         res.setHeader('x-gateway-attempts', String(result.attempts.length));
 
-        requestsTotal.inc({ alias, http_status: '200', cache: cacheResult.toLowerCase() });
-        requestDuration.observe({ alias, stream: 'false' }, latencyMs / 1000);
-        overheadSeconds.observe((latencyMs - upstreamMs) / 1000);
+        res.locals.upstreamLatencyMs = upstreamMs;
 
         if (cacheDecision.cacheable && result.response.choices[0]?.finish_reason === 'stop' && cacheKey) {
           void cacheSet(deps.redis, cacheKey, { response: result.response, provider: result.provider, model: result.model }, cacheTtl);
@@ -305,8 +318,9 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
         });
       } catch (err) {
         const latencyMs = Date.now() - startTime;
+        const failedAttempts = (err instanceof GatewayError && Array.isArray(err.attempts) ? err.attempts : []) as AttemptRecord[];
+        res.locals.upstreamLatencyMs = failedAttempts.reduce((total, attempt) => total + attempt.latencyMs, 0);
         const httpStatus = err instanceof GatewayError ? err.httpStatus : 500;
-        requestsTotal.inc({ alias, http_status: String(httpStatus), cache: cacheResult.toLowerCase() });
         enqueueUsage({
           requestId: req.requestId,
           apiKeyId: apiKey.id,
@@ -320,7 +334,7 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
           httpStatus,
           errorCode: err instanceof GatewayError ? err.code : 'internal_error',
           latencyMs,
-          attemptRecords: [],
+          attemptRecords: failedAttempts,
         });
         next(err);
       }
@@ -329,4 +343,3 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
 
   return router;
 }
-

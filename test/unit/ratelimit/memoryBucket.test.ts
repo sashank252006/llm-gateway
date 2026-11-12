@@ -27,5 +27,14 @@ describe('MemoryBucket', () => {
     const result = await bucket.check('key4', 5, 1);
     expect(result.allowed).toBe(true);
   });
-});
 
+  it('refills with an injected clock and evicts idle buckets', async () => {
+    let now = 0;
+    const bucket = new MemoryBucket(() => now, 100, 1);
+    await bucket.check('old', 2, 1);
+    now = 1_000;
+    const refilled = await bucket.check('current', 2, 1);
+    expect(refilled.allowed).toBe(true);
+    expect(bucket.size).toBe(1);
+  });
+});

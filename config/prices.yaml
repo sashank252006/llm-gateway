@@ -4,12 +4,11 @@ models:
     input: 0.15
     output: 0.60
   "gpt-4o":
-    input: 5.00
-    output: 15.00
-  "claude-haiku-20240307":
-    input: 0.25
-    output: 1.25
-  "claude-3-5-sonnet-20241022":
+    input: 2.50
+    output: 10.00
+  "claude-haiku-5-5":
+    input: 0.10
+    output: 0.50
+  "claude-sonnet-4-6":
     input: 3.00
     output: 15.00
-

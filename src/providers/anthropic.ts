@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { ProviderAdapter } from './ProviderAdapter.js';
-import type { ChatRequest, ChatChunk, ChatResponse, Target, CallContext, Usage } from '../domain/types.js';
+import type { ChatRequest, ChatChunk, ChatResponse, Target, CallContext, Usage, FinishReason } from '../domain/types.js';
 import { classifyHttpError, classifyNetworkError, classifyTimeout } from './classify.js';
 import { env } from '../config/env.js';
 
@@ -9,7 +9,7 @@ export class AnthropicAdapter implements ProviderAdapter {
   private client: Anthropic;
 
   constructor() {
-    this.client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+    this.client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, baseURL: env.ANTHROPIC_BASE_URL, maxRetries: 0 });
   }
 
   private buildParams(req: ChatRequest, target: Target) {
@@ -33,14 +33,15 @@ export class AnthropicAdapter implements ProviderAdapter {
       system,
       max_tokens: req.max_tokens ?? 4096, // Anthropic requires max_tokens
       temperature: req.temperature,
-      top_p: req.top_p,
+      top_p: req.temperature === undefined ? req.top_p : undefined,
       stop_sequences,
     };
   }
 
-  private mapStopReason(reason: string | null): 'stop' | 'length' {
+  private mapStopReason(reason: string | null): FinishReason {
     if (reason === 'end_turn') return 'stop';
     if (reason === 'max_tokens') return 'length';
+    if (reason === 'refusal') return 'content_filter';
     return 'stop';
   }
 
@@ -74,11 +75,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       };
 
       return { response, usage };
-    } catch (err: unknown) {
-      if (err instanceof Anthropic.APIError) throw classifyHttpError(err.status ?? 500);
-      if (err instanceof DOMException && err.name === 'TimeoutError') throw classifyTimeout();
-      throw classifyNetworkError();
-    }
+    } catch (err: unknown) { throw classifyAnthropicError(err); }
   }
 
   async *stream(req: ChatRequest, target: Target, ctx: CallContext): AsyncIterable<ChatChunk> {
@@ -132,10 +129,25 @@ export class AnthropicAdapter implements ProviderAdapter {
           }
         }
       }
-    } catch (err: unknown) {
-      if (err instanceof Anthropic.APIError) throw classifyHttpError(err.status ?? 500);
-      if (err instanceof DOMException && err.name === 'TimeoutError') throw classifyTimeout();
-      throw classifyNetworkError();
-    }
+    } catch (err: unknown) { throw classifyAnthropicError(err); }
   }
+}
+
+function retryAfterMs(err: { headers?: { get?: (name: string) => string | null } | Record<string, string | undefined> }): number | undefined {
+  const headers = err.headers;
+  const value = headers && 'get' in headers && typeof headers.get === 'function'
+    ? headers.get('retry-after')
+    : (headers as Record<string, string | undefined> | undefined)?.['retry-after'];
+  if (!value) return undefined;
+  const seconds = Number(value);
+  return Number.isFinite(seconds) ? Math.max(0, seconds * 1000) : undefined;
+}
+
+function classifyAnthropicError(err: unknown) {
+  if (err instanceof Anthropic.APIConnectionTimeoutError) return classifyTimeout();
+  if (err instanceof Anthropic.APIUserAbortError) return classifyNetworkError();
+  if (err instanceof Anthropic.APIConnectionError) return classifyNetworkError();
+  if (err instanceof Anthropic.APIError) return classifyHttpError(err.status ?? 500, retryAfterMs(err));
+  if (err instanceof DOMException && err.name === 'TimeoutError') return classifyTimeout();
+  return classifyNetworkError();
 }
