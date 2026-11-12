@@ -46,7 +46,7 @@ export const RouteAliasSchema = z.object({
 });
 
 export const RouteConfigSchema = z.object({
-  aliases: z.record(RouteAliasSchema),
+  aliases: z.record(z.string(), RouteAliasSchema),
 });
 
 export const PriceEntrySchema = z.object({
@@ -55,5 +55,5 @@ export const PriceEntrySchema = z.object({
 });
 
 export const PricesConfigSchema = z.object({
-  models: z.record(PriceEntrySchema),
+  models: z.record(z.string(), PriceEntrySchema),
 });

@@ -53,10 +53,10 @@ cp .env.example .env
 cd deploy && docker compose up -d
 
 # 4. Create an API key (Compose runs prisma migrate deploy before the gateway starts)
-npm run key:create -- --name=my-app
+docker compose exec gateway node dist/scripts/createKey.js --name=my-app
 
-# 6. Call the gateway
-curl http://localhost:3000/v1/chat/completions \
+# 5. Call the gateway through Nginx
+curl http://localhost/v1/chat/completions \
   -H "Authorization: Bearer lgw_live_..." \
   -H "Content-Type: application/json" \
   -d '{
@@ -126,7 +126,7 @@ aliases:
   fast:
     chain:
       - provider: openai
-        model: "gpt-4o-mini"
+        model: "gpt-6-luna"
         timeoutMs: 15000
       - provider: anthropic       # fallback
         model: "claude-haiku-5-5"
@@ -134,19 +134,19 @@ aliases:
   smart:
     chain:
       - provider: anthropic
-        model: "claude-sonnet-4-6"
+        model: "claude-sonnet-5-5"
         timeoutMs: 60000
       - provider: openai
-        model: "gpt-4o"
+        model: "gpt-6.1-terra"
         timeoutMs: 60000
 ```
 
 ### Prices (`config/prices.yaml`)
 ```yaml
 models:
-  "gpt-4o-mini":
-    input: 0.15   # USD per 1M tokens
-    output: 0.60
+  "gpt-6-luna":
+    input: 0.10   # USD per 1M tokens
+    output: 0.50
 ```
 
 ---

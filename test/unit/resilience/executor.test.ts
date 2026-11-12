@@ -44,6 +44,44 @@ describe('executeWithResilience', () => {
     }
   });
 
+  it('falls back after the configured transient retries are exhausted', async () => {
+    adapter.complete
+      .mockRejectedValueOnce(new UpstreamError('timeout', true, true))
+      .mockRejectedValueOnce(new UpstreamError('timeout', true, true))
+      .mockRejectedValueOnce(new UpstreamError('timeout', true, true))
+      .mockResolvedValueOnce(success);
+    const result = await executeWithResilience(request, targets, context(), new InMemoryBreakerStore());
+    expect(result.provider).toBe('anthropic');
+    expect(result.fallbackUsed).toBe(true);
+    expect(result.attempts).toHaveLength(4);
+  });
+
+  it('falls back on provider-auth failures without retrying the failed provider', async () => {
+    adapter.complete
+      .mockRejectedValueOnce(new UpstreamError('http_4xx', false, true, 401))
+      .mockResolvedValueOnce(success);
+    const result = await executeWithResilience(request, targets, context(), new InMemoryBreakerStore());
+    expect(result.provider).toBe('anthropic');
+    expect(adapter.complete).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns a 503 with a cooldown when every circuit is open', async () => {
+    const breaker = new InMemoryBreakerStore(1, 100);
+    breaker.recordFailure('openai');
+    breaker.recordFailure('anthropic');
+    await expect(executeWithResilience(request, targets, context(), breaker)).rejects.toMatchObject({
+      code: 'all_providers_unavailable', httpStatus: 503, retryAfterSeconds: 1,
+    } satisfies Partial<GatewayError>);
+    expect(adapter.complete).not.toHaveBeenCalled();
+  });
+
+  it('returns client_aborted immediately when its caller has disconnected', async () => {
+    const abort = new AbortController();
+    abort.abort();
+    await expect(executeWithResilience(request, targets, { requestId: 'req_abort', signal: abort.signal }, new InMemoryBreakerStore())).rejects.toMatchObject({ code: 'client_aborted' });
+    expect(adapter.complete).not.toHaveBeenCalled();
+  });
+
   it('never falls back after a streamed response commits', async () => {
     adapter.stream.mockImplementationOnce(async function* () {
       yield { id: 'id', object: 'chat.completion.chunk', created: 0, model: 'one', choices: [{ index: 0, delta: { content: 'A1' }, finish_reason: null }] };

@@ -57,6 +57,16 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
     validateChatRequest,
     async (req: Request, res: Response, next: NextFunction) => {
       const startTime = req.startTime ?? Date.now();
+      // This must be installed before any awaited cache work. Otherwise a
+      // caller that leaves during the cache lookup can still trigger and pay
+      // for an upstream request.
+      const abortController = new AbortController();
+      const abortOnClientClose = () => {
+        if (!res.writableEnded) abortController.abort();
+      };
+      res.on('close', abortOnClientClose);
+      if (res.destroyed) abortOnClientClose();
+
       const apiKey = req.apiKey!;
       const body = req.body as ChatRequest;
       const alias = body.model;
@@ -160,12 +170,6 @@ export function chatCompletionsRouter(deps: { prisma: PrismaClient; redis: Redis
         cacheRequestsTotal.inc({ result: 'skip' });
       }
 
-      const abortController = new AbortController();
-      // IncomingMessage's close event is not a reliable client-disconnect
-      // signal after the request body has been consumed. Response close is.
-      res.on('close', () => {
-        if (!res.writableEnded) abortController.abort();
-      });
       const callCtx = { signal: abortController.signal, requestId: req.requestId };
 
       // ── Streaming ──────────────────────────────────────────────────────────

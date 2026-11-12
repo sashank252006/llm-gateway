@@ -27,4 +27,16 @@ describe('InMemoryBreakerStore', () => {
     expect(breaker.get('anthropic').state).toBe('closed');
     expect(breaker.get('anthropic').failures).toBe(0);
   });
+
+  it('reopens a failed probe with an exponential cooldown', () => {
+    let now = 0;
+    const breaker = new InMemoryBreakerStore(1, 100, () => now);
+    breaker.recordFailure('openai');
+    now = 100;
+    expect(breaker.isAllowed('openai')).toBe(false);
+    expect(breaker.tryProbe('openai')).toBe(true);
+    breaker.recordFailure('openai');
+    expect(breaker.get('openai')).toMatchObject({ state: 'open', cooldownMs: 200, probeInFlight: false });
+    expect(breaker.cooldownRemainingMs('openai')).toBe(200);
+  });
 });

@@ -30,7 +30,9 @@ export class OpenAIAdapter implements ProviderAdapter {
         // Keep the portable parameter intersection: several upstream models
         // reject simultaneous temperature and top_p values.
         top_p: req.temperature === undefined ? req.top_p : undefined,
-        max_tokens: req.max_tokens,
+        // max_tokens is deprecated for the current Chat Completions API and
+        // is incompatible with modern reasoning-capable models.
+        max_completion_tokens: req.max_tokens,
         stop: req.stop,
       }, { signal });
 
@@ -76,7 +78,7 @@ export class OpenAIAdapter implements ProviderAdapter {
         messages,
         temperature: req.temperature,
         top_p: req.temperature === undefined ? req.top_p : undefined,
-        max_tokens: req.max_tokens,
+        max_completion_tokens: req.max_tokens,
         stop: req.stop,
         stream: true,
         stream_options: { include_usage: true },

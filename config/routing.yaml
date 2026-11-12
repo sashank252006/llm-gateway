@@ -2,7 +2,7 @@ aliases:
   fast:
     chain:
       - provider: openai
-        model: "gpt-4o-mini"
+        model: "gpt-6-luna"
         timeoutMs: 15000
       - provider: anthropic
         model: "claude-haiku-5-5"
@@ -10,13 +10,13 @@ aliases:
   smart:
     chain:
       - provider: anthropic
-        model: "claude-sonnet-4-6"
+        model: "claude-sonnet-5-5"
         timeoutMs: 60000
       - provider: openai
-        model: "gpt-4o"
+        model: "gpt-6.1-terra"
         timeoutMs: 60000
   cheap:
     chain:
       - provider: openai
-        model: "gpt-4o-mini"
+        model: "gpt-6-luna"
         timeoutMs: 15000

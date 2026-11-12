@@ -27,15 +27,24 @@ export class AnthropicAdapter implements ProviderAdapter {
       ? (Array.isArray(req.stop) ? req.stop : [req.stop])
       : undefined;
 
-    return {
+    const params = {
       model: target.model,
       messages,
       system,
       max_tokens: req.max_tokens ?? 4096, // Anthropic requires max_tokens
-      temperature: req.temperature,
-      top_p: req.temperature === undefined ? req.top_p : undefined,
       stop_sequences,
     };
+
+    // Current Claude 5.5 models reject temperature/top_p. Preserve these
+    // controls for legacy custom routes only; the maintained aliases use 5.5.
+    if (!target.model.endsWith('-5-5')) {
+      return {
+        ...params,
+        temperature: req.temperature,
+        top_p: req.temperature === undefined ? req.top_p : undefined,
+      };
+    }
+    return params;
   }
 
   private mapStopReason(reason: string | null): FinishReason {

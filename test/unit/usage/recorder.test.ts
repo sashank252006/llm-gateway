@@ -3,7 +3,7 @@ import { enqueueUsage, flushAndShutdown, flushPendingUsage, initUsageRecorder } 
 
 const baseRecord = {
   requestId: 'req-recorder', apiKeyId: '00000000-0000-0000-0000-000000000001', createdAt: new Date(), alias: 'fast',
-  provider: 'openai', model: 'gpt-4o-mini', stream: false, cacheHit: false, fallbackUsed: false,
+  provider: 'openai', model: 'gpt-6-luna', stream: false, cacheHit: false, fallbackUsed: false,
   attempts: 1, status: 'ok', httpStatus: 200, inputTokens: 10, outputTokens: 5, latencyMs: 20, attemptRecords: [],
 };
 
@@ -39,5 +39,28 @@ describe('usage recorder', () => {
     transaction.mockImplementationOnce(async (callback) => callback({ usageEvent, providerAttempt, apiKey }));
     await flushPendingUsage();
     expect(usageEvent.createMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists zero cost and recorded savings for a cache hit', async () => {
+    const usageEvent = { createMany: vi.fn().mockResolvedValue({ count: 1 }) };
+    const providerAttempt = { createMany: vi.fn().mockResolvedValue({ count: 0 }) };
+    const apiKey = { updateMany: vi.fn().mockResolvedValue({ count: 1 }) };
+    const transaction = vi.fn(async (callback) => callback({ usageEvent, providerAttempt, apiKey }));
+    initUsageRecorder(prismaMock(transaction));
+    enqueueUsage({ ...baseRecord, requestId: 'req-cache-hit', cacheHit: true, attempts: 0, costUsd: 0, savedCostUsd: 0.123 });
+    await flushPendingUsage();
+    expect(usageEvent.createMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: [expect.objectContaining({ costUsd: 0, savedCostUsd: 0.123 })],
+    }));
+  });
+
+  it('drops permanently invalid rows instead of endlessly requeueing them', async () => {
+    const permanent = Object.assign(new Error('foreign key violation'), { code: 'P2003' });
+    const transaction = vi.fn().mockRejectedValue(permanent);
+    initUsageRecorder(prismaMock(transaction));
+    enqueueUsage({ ...baseRecord, requestId: 'req-permanent' });
+    await flushPendingUsage();
+    await flushPendingUsage();
+    expect(transaction).toHaveBeenCalledTimes(1);
   });
 });

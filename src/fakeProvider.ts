@@ -1,9 +1,7 @@
 import express from 'express';
+import { fileURLToPath } from 'url';
+import { resolve } from 'path';
 
-const app = express();
-app.use(express.json());
-
-const port = Number(process.env.FAKE_PROVIDER_PORT ?? 3001);
 interface FakeBehavior { latencyMs: number; statusCode: number; dieAfterChunks: number; hang: boolean; }
 const defaultBehavior = (): FakeBehavior => ({
   latencyMs: Number(process.env.FAKE_PROVIDER_LATENCY_MS ?? 0),
@@ -11,8 +9,6 @@ const defaultBehavior = (): FakeBehavior => ({
   dieAfterChunks: Number(process.env.FAKE_PROVIDER_DIE_AFTER_CHUNKS ?? 0),
   hang: process.env.FAKE_PROVIDER_HANG === 'true',
 });
-const behaviors: Record<'openai' | 'anthropic', FakeBehavior> = { openai: defaultBehavior(), anthropic: defaultBehavior() };
-
 async function delay(behavior: FakeBehavior): Promise<void> {
   if (behavior.latencyMs > 0) await new Promise((resolve) => setTimeout(resolve, behavior.latencyMs));
 }
@@ -39,7 +35,13 @@ function openaiStream(res: express.Response, model: string, behavior: FakeBehavi
   res.end('data: [DONE]\n\n');
 }
 
-app.post('/v1/chat/completions', async (req, res) => {
+/** A controllable local upstream used by integration tests and k6 scenarios. */
+export function createFakeProvider(): express.Express {
+  const app = express();
+  const behaviors: Record<'openai' | 'anthropic', FakeBehavior> = { openai: defaultBehavior(), anthropic: defaultBehavior() };
+  app.use(express.json());
+
+  app.post('/v1/chat/completions', async (req, res) => {
   const behavior = behaviors.openai;
   if (behavior.hang) return;
   await delay(behavior);
@@ -54,9 +56,9 @@ app.post('/v1/chat/completions', async (req, res) => {
     choices: [{ index: 0, message: { role: 'assistant', content: 'fake response' }, finish_reason: 'stop' }],
     usage: { prompt_tokens: 2, completion_tokens: 2, total_tokens: 4 },
   });
-});
+  });
 
-app.post('/v1/messages', async (req, res) => {
+  app.post('/v1/messages', async (req, res) => {
   const behavior = behaviors.anthropic;
   if (behavior.hang) return;
   await delay(behavior);
@@ -85,10 +87,10 @@ app.post('/v1/messages', async (req, res) => {
     return res.end();
   }
   res.json({ id: 'fake-anthropic', type: 'message', role: 'assistant', model, content: [{ type: 'text', text: 'fake response' }], stop_reason: 'end_turn', usage: { input_tokens: 2, output_tokens: 2 } });
-});
+  });
 
-app.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
-app.post('/__control/:provider', (req, res) => {
+  app.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
+  app.post('/__control/:provider', (req, res) => {
   const provider = req.params.provider;
   if (provider !== 'openai' && provider !== 'anthropic') return res.status(404).json({ error: 'unknown provider' });
   const next = req.body as Partial<FakeBehavior>;
@@ -100,5 +102,16 @@ app.post('/__control/:provider', (req, res) => {
     hang: typeof next.hang === 'boolean' ? next.hang : current.hang,
   };
   res.json(behaviors[provider]);
-});
-app.listen(port, () => console.log(`Fake provider listening on ${port}`));
+  });
+
+  return app;
+}
+
+function isEntrypoint(): boolean {
+  return Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === resolve(process.argv[1]!);
+}
+
+if (isEntrypoint()) {
+  const port = Number(process.env.FAKE_PROVIDER_PORT ?? 3001);
+  createFakeProvider().listen(port, () => console.log(`Fake provider listening on ${port}`));
+}
